@@ -439,9 +439,9 @@ T1,T2,T3,T4,T5=st.tabs(['🧬 Pre-Rise DNA','🕰️ Timeline','🕵️ Feature 
 with T1:
     st.subheader('🧬 這隻股票的爆升前 DNA')
     st.write(f"**事件樣本：{res['event_count']}**　｜　事件率：{res['event_rate']:.1%}　｜　研究窗口：{res['horizon']} 日")
-    if d['dna']:
-        st.write('**目前 DNA：** ' + ' + '.join(FEATURE_LABELS.get(f,f) for f in d['dna']))
-        dna_df=pd.DataFrame([{'Feature':f,'方向':'↑' if res['directions'].get(f,1)>0 else '↓','Train門檻':res['thresholds'].get(f,np.nan),'中文':FEATURE_LABELS.get(f,f)} for f in d['dna']])
+    if res['dna']:
+        st.write('**目前 DNA：** ' + ' + '.join(FEATURE_LABELS.get(f,f) for f in res['dna']))
+        dna_df=pd.DataFrame([{'Feature':f,'方向':'↑' if res['directions'].get(f,1)>0 else '↓','Train門檻':res['thresholds'].get(f,np.nan),'中文':FEATURE_LABELS.get(f,f)} for f in res['dna']])
         st.dataframe(dna_df,use_container_width=True,hide_index=True)
     st.subheader('📊 Historical Feature Separation')
     eff=res['effects'].copy()
