@@ -323,7 +323,7 @@ def breakout_state(x):
 
 
 def current_decision(x, train, oos, dna, directions, thresholds, event_threshold, info_negative=False):
-    r=x.iloc[-1]
+    r=x.iloc[-1]; price=float(r.Close)
     live_pred=bool(apply_dna(x.tail(1),dna,directions,thresholds).iloc[0])
     op=apply_dna(oos,dna,directions,thresholds)
     om=metrics(oos.future_mfe>=event_threshold,op) if len(oos) else metrics(pd.Series(dtype=bool),pd.Series(dtype=bool))
