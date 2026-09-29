@@ -407,6 +407,76 @@ def run(symbol, period):
     return {'df':df,'x':x,'qqq':qqq,'vix':vix,'train':train,'oos':oos,'embargo':embargo,'horizon':h,'threshold':thr,'quantile':q,'event_count':n_events,'event_rate':rate,'dna':dna,'directions':directions,'thresholds':thresholds,'effects':eff,'timeline':timeline,'lag_effects':lag_df,'peak_lags':peaks,'decision':dec,'plan':plan,'qa':qa}
 
 
+def _fmt(v, kind='num'):
+    """Safe formatter for the AI prompt."""
+    try:
+        if v is None or (not isinstance(v,(str,bool)) and pd.isna(v)): return '—'
+    except Exception:
+        pass
+    if isinstance(v,(bool,np.bool_)): return 'YES' if v else 'NO'
+    if kind=='pct': return f'{float(v):.1%}'
+    if kind=='usd': return f'${float(v):,.2f}'
+    if kind=='num': return f'{float(v):,.3f}' if isinstance(v,(int,float,np.floating,np.integer)) else str(v)
+    return str(v)
+
+
+def _md_table(df, cols):
+    lines=['| '+' | '.join(cols)+' |','|'+'|'.join(['---']*len(cols))+'|']
+    for _,row in df.iterrows():
+        lines.append('| '+' | '.join(str(row[c]) for c in cols)+' |')
+    return '\n'.join(lines)
+
+
+def build_ai_prompt(symbol, period, res, checks):
+    """Collect every analysis result on the page into one copy-paste prompt for an external AI."""
+    d=res['decision']; x=res['x']; latest=x.iloc[-1]; plan=res['plan']; m=d['oos']; b=d['breakout']
+    L=[]
+    L.append('# 角色\n你是一位嚴謹的量化交易研究員，擅長檢查回測是否過擬合、OOS 是否可信。請只根據下方數據作答，不要編造沒有提供的數字；資料不足時請明確說「資料不足」。')
+    L.append(f'# 1. 研究設定\n- 股票：{symbol}\n- 資料範圍：{period}，截至 {x.index[-1].date()}\n- 最新收市價：{_fmt(float(latest.Close),"usd")}\n'
+             f'- 事件定義：未來 {res["horizon"]} 個交易日最高升幅 ≥ {_fmt(res["threshold"],"pct")}（門檻只由訓練資料學習，分位數 {_fmt(res["quantile"])}）\n'
+             f'- 事件樣本數：{res["event_count"]}；事件率：{_fmt(res["event_rate"],"pct")}\n'
+             f'- Train / Embargo / OOS 天數：{len(res["train"])} / {len(res["embargo"])} / {len(res["oos"])}')
+    dna=res['dna']
+    if dna:
+        rows=pd.DataFrame([{'特徵':FEATURE_LABELS.get(f,f),'方向':'↑' if res['directions'].get(f,1)>0 else '↓','Train門檻':_fmt(res['thresholds'].get(f,np.nan)),'今日數值':_fmt(latest.get(f,np.nan))} for f in dna])
+        L.append('# 2. Stock DNA（訓練資料學到的爆升前狀態）\n'+_md_table(rows,['特徵','方向','Train門檻','今日數值']))
+    else:
+        L.append('# 2. Stock DNA\n未能建立 DNA（樣本不足）。')
+    eff=res['effects']
+    if not eff.empty:
+        e=eff.head(10).copy()
+        e=pd.DataFrame({'特徵':e['特徵'],'事件平均':e['事件平均'].map(_fmt),'普通日平均':e['普通日平均'].map(_fmt),'Effect Size':e['Effect Size'].map(_fmt)})
+        L.append('# 3. Feature Effect Size（Top 10，只用 Train）\n'+_md_table(e,['特徵','事件平均','普通日平均','Effect Size']))
+    tp=d['trend_parts']
+    L.append('# 4. 今日決策與狀態\n'
+             f'- 系統決策：{d["decision"]}\n- 目前 DNA 是否命中：{_fmt(d["dna_match"])}\n- 歷史相似度 (match)：{_fmt(d["match"],"pct")}；最相似 25 日的歷史命中率：{_fmt(d["sim_hit"],"pct")}\n'
+             f'- 研究 Confidence：{d["confidence"]:.0f}/100\n- 趨勢分數：{d["trend"]:.0f}/100（'+'、'.join(f'{k}:{"✓" if v else "✗"}' for k,v in tp.items())+f'）\n'
+             f'- 成交量：{d["volume_label"]}（{d["volume"]}/100）\n- 入場品質：{d["entry_quality"]:.0f}/100\n'
+             f'- 是否過度延伸(EMA20)：{_fmt(d["extended"])}；EMA20 Reclaim：{_fmt(d["reclaim"])}；EMA20 乖離：{_fmt(d["ema_dist"],"pct")}\n'
+             f'- 突破狀態：{b["stage"]}（關鍵位 {_fmt(b["level"],"usd")}；突破品質 {b["quality"]:.0f}；Confirmed={_fmt(b["confirmed"])}；Retest={_fmt(b["retest"])}；False={_fmt(b["false"])}；距突破 {_fmt(int(b["age"]) if pd.notna(b["age"]) else np.nan,"str")} 日）')
+    sim=d['sim']
+    if isinstance(sim,pd.DataFrame) and not sim.empty and 'distance' in sim:
+        t=sim.head(5); t=pd.DataFrame({'日期':[i.date() for i in t.index],'距離':t['distance'].map(_fmt),'其後MFE':t['future_mfe'].map(lambda v:_fmt(v,'pct')),'其後MAE':t['future_mae'].map(lambda v:_fmt(v,'pct')) if 'future_mae' in t else '—'})
+        L.append('# 5. 歷史上最相似的 5 個日子\n'+_md_table(t,['日期','距離','其後MFE','其後MAE']))
+    L.append('# 6. OOS 證據（未參與 DNA 選擇）\n'
+             f'- Precision：{_fmt(m["Precision"],"pct")}；Recall：{_fmt(m["Recall"],"pct")}；F1：{_fmt(m["F1"],"pct")}\n'
+             f'- TP/FP/FN/TN：{m["TP"]}/{m["FP"]}/{m["FN"]}/{m["TN"]}；OOS 訊號數：{m["Signals"]}\n'
+             f'- OOS 基準事件率（隨機買入的期望命中率）：{_fmt(float((res["oos"].future_mfe>=res["threshold"]).mean()) if len(res["oos"]) else np.nan,"pct")}')
+    L.append('# 7. 交易計劃（系統自動計算）\n'
+             f'- 早進區：{_fmt(plan["early"][0],"usd")} – {_fmt(plan["early"][1],"usd")}\n- 確認進場區：{_fmt(plan["confirm"][0],"usd")} – {_fmt(plan["confirm"][1],"usd")}\n'
+             f'- 突破位：{_fmt(plan["breakout"],"usd")}；止損：{_fmt(plan["stop"],"usd")}（風險 {_fmt(plan["risk"],"pct")}）\n- T1：{_fmt(plan["t1"],"usd")}；T2：{_fmt(plan["t2"],"usd")}')
+    L.append('# 8. Model QA\n'+'\n'.join(f'- {a}：{"PASS" if ok else "FAIL"}' for a,ok in checks))
+    L.append('# 你的任務\n請用繁體中文，按以下結構回答，全部要有具體數字支持：\n'
+             '1. **一句話結論**：今天應該 BUY / WAIT / NO TRADE？方向要明確，不要模棱兩可。\n'
+             '2. **證據強度**：OOS Precision 相比基準事件率是否有真實優勢？OOS 訊號數是否足夠（少於 20 個訊號時請直接指出統計上不可靠）？\n'
+             '3. **DNA 可信度**：哪些特徵最可能是真訊號，哪些可能是雜訊或過擬合？\n'
+             '4. **今日入場分析**：趨勢、成交量、突破狀態、EMA20 延伸程度，哪一項是最大阻力？\n'
+             '5. **交易計劃審查**：進場、止損、T1/T2 的風險回報比是否合理？如不合理請給出修正價位。\n'
+             '6. **最大風險與反面論點**：什麼情況下這個判斷會錯？\n'
+             '7. **下一步**：列出 3 個最值得優先驗證的研究問題。')
+    return '\n\n'.join(L)
+
+
 # ---------------- UI ----------------
 st.title('🔬 Pre-Rise Lab V3.3')
 st.caption('核心目標：研究每隻股票過去5年「大幅上升前」的狀態，建立 Stock DNA，再檢查今天是否再次出現類似狀態。')
@@ -435,7 +505,7 @@ if d['decision']=='🟢 BUY NOW': st.success(f'{symbol} → 🟢 BUY NOW：歷�
 elif d['decision'].startswith('🔵'): st.info(f'{symbol} → {d["decision"]}：方向不等於追價位置。')
 else: st.warning(f'{symbol} → {d["decision"]}：至少一個核心條件尚未通過。')
 
-T1,T2,T3,T4,T5=st.tabs(['🧬 Pre-Rise DNA','🕰️ Timeline','🕵️ Feature Detective','🎮 Replay','🧪 OOS & QA'])
+T1,T2,T3,T4,T5,T6=st.tabs(['🧬 Pre-Rise DNA','🕰️ Timeline','🕵️ Feature Detective','🎮 Replay','🧪 OOS & QA','🤖 AI Prompt'])
 with T1:
     st.subheader('🧬 這隻股票的爆升前 DNA')
     st.write(f"**事件樣本：{res['event_count']}**　｜　事件率：{res['event_rate']:.1%}　｜　研究窗口：{res['horizon']} 日")
@@ -511,6 +581,14 @@ with T5:
     st.dataframe(pd.DataFrame([{'QA':a,'結果':'✅ PASS' if b else '❌ FAIL'} for a,b in checks]),use_container_width=True,hide_index=True)
     st.subheader('📋 QA 原始資料')
     st.dataframe(res['qa'],use_container_width=True,hide_index=True)
+
+with T6:
+    st.subheader('🤖 自動總結：一鍵生成 AI Prompt')
+    st.write('已把上面所有分析結果（設定、DNA、Effect Size、今日決策、相似歷史、OOS、交易計劃、QA）整合成一份 Prompt，複製後貼到 Claude / ChatGPT 即可要求它做二次審查。')
+    ai_prompt=build_ai_prompt(symbol,period,res,checks)
+    st.code(ai_prompt,language='markdown')
+    st.download_button('⬇️ 下載 Prompt (.txt)',ai_prompt,file_name=f'{symbol}_ai_prompt_{x.index[-1].date()}.txt',mime='text/plain')
+    st.caption(f'約 {len(ai_prompt):,} 字元。右上角的複製按鈕可直接複製全文。Prompt 只含數據摘要，不含原始價格序列。')
 
 st.markdown('---')
 st.markdown('### 🔬 V3.3 研究哲學')
